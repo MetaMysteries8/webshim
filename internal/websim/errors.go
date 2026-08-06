@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"regexp"
 	"strings"
 )
 
@@ -89,6 +90,18 @@ func (e *APIError) Unwrap() error {
 	return nil
 }
 
+// emailRe matches email addresses.
+//
+// WebSim's error bodies can embed decoded JWT claims. An expired-token response
+// carries the account's email, so echoing a raw error body into a log file
+// leaks personal data that the operator never chose to record. Rule 14 asks for
+// a sanitized error body; this is part of what that means in practice.
+var emailRe = regexp.MustCompile(`[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}`)
+
+// jwtRe matches a compact JWT, which may appear inside an error body even
+// though it never appears in a header we wrote.
+var jwtRe = regexp.MustCompile(`eyJ[A-Za-z0-9_\-]{8,}\.[A-Za-z0-9_\-]{8,}\.[A-Za-z0-9_\-]+`)
+
 // sanitizer removes secrets from strings bound for logs or error messages.
 type sanitizer struct {
 	secrets []string
@@ -106,16 +119,20 @@ func newSanitizer(secrets ...string) *sanitizer {
 	return s
 }
 
-// clean replaces every known secret in v with a redaction marker.
+// clean replaces every known secret in v with a redaction marker, then strips
+// credential material and personal data that may have arrived from upstream.
 func (s *sanitizer) clean(v string) string {
-	if s == nil {
-		return v
-	}
-	for _, sec := range s.secrets {
-		if sec != "" && strings.Contains(v, sec) {
-			v = strings.ReplaceAll(v, sec, "[redacted]")
+	if s != nil {
+		for _, sec := range s.secrets {
+			if sec != "" && strings.Contains(v, sec) {
+				v = strings.ReplaceAll(v, sec, "[redacted]")
+			}
 		}
 	}
+	// These run even when the sanitizer has no configured secrets, because
+	// the value being scrubbed came from the server rather than from us.
+	v = jwtRe.ReplaceAllString(v, "[redacted-jwt]")
+	v = emailRe.ReplaceAllString(v, "[redacted-email]")
 	return v
 }
 

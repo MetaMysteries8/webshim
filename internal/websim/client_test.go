@@ -520,6 +520,32 @@ func TestErrorsAndLogsNeverCarryTheToken(t *testing.T) {
 	}
 }
 
+// TestSanitizeStripsUpstreamCredentialsAndPII covers what WebSim actually
+// returns on an expired token: an error body carrying the decoded JWT claims,
+// including the account's email address. None of that should reach a log file.
+func TestSanitizeStripsUpstreamCredentialsAndPII(t *testing.T) {
+	t.Parallel()
+
+	f := newFakeServer(t)
+	c := f.client(t)
+
+	body := `{"error":{"cause":{"code":"ERR_JWT_EXPIRED","payload":{"email":"someone@example.com",` +
+		`"role":"authenticated"}},"token":"eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.abc123def"}}`
+
+	clean := c.Sanitize(body)
+	if strings.Contains(clean, "someone@example.com") {
+		t.Errorf("an email survived sanitization: %s", clean)
+	}
+	if strings.Contains(clean, "eyJhbGciOiJIUzI1NiJ9") {
+		t.Errorf("a JWT survived sanitization: %s", clean)
+	}
+	// The diagnostic value must survive: the operator still needs to know
+	// why the call failed.
+	if !strings.Contains(clean, "ERR_JWT_EXPIRED") {
+		t.Errorf("sanitization destroyed the useful part: %s", clean)
+	}
+}
+
 func TestTokenTypeRedactsItself(t *testing.T) {
 	t.Parallel()
 
