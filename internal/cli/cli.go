@@ -43,6 +43,8 @@ func Run(args []string) int {
 		err = runRollback(args[1:])
 	case "models":
 		err = runModels(args[1:])
+	case "ask":
+		err = runAsk(args[1:])
 	case "version", "--version", "-v":
 		fmt.Println("webshim", Version)
 		return 0
@@ -89,7 +91,13 @@ Usage:
   webshim publish [alias] <path>   publish a file or directory
   webshim rollback [alias] <ver>   make an earlier revision current
   webshim models [provider]        list usable providers and models
+  webshim ask [alias] "..."        run one agent turn without the TUI
   webshim version
+
+Flags for ask:
+  --mode manual|normal|yolo   how much to approve (default: normal)
+  --provider ID --model ID    override the model
+  --yes                       approve every prompt automatically
 
 Common flags:
   --json        emit the machine-readable operational record
