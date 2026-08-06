@@ -4,6 +4,7 @@ package main
 import (
 	"fmt"
 	"os"
+	"strings"
 
 	"github.com/MetaMysteries8/webshim/internal/cli"
 )
@@ -11,12 +12,14 @@ import (
 func main() {
 	args := os.Args[1:]
 
-	// With no arguments the TUI is the intended entrypoint. Until it lands,
-	// point the operator at what does work rather than failing silently.
-	if len(args) == 0 {
-		fmt.Fprintln(os.Stderr, "webshim: the TUI is not wired up yet.")
-		fmt.Fprintln(os.Stderr, "Try `webshim doctor` to check your setup, or `webshim help`.")
-		os.Exit(2)
+	// With no subcommand, or with only flags, start the interface. Anything
+	// that begins with a dash is a flag for the TUI, not a command name.
+	if len(args) == 0 || strings.HasPrefix(args[0], "-") {
+		if err := cli.RunTUI(args); err != nil {
+			fmt.Fprintln(os.Stderr, "webshim:", err)
+			os.Exit(1)
+		}
+		return
 	}
 
 	os.Exit(cli.Run(args))

@@ -11,8 +11,8 @@ Built in Go on the [Charm](https://charm.sh) stack: Bubble Tea, Bubbles, Lip
 Gloss, Huh, Glamour, Glow, Log, Harmonica, Wish, and
 [Fantasy](https://charm.land/fantasy) for the agent loop.
 
-> **Status: in development.** The WebSim API client and its test suite are done.
-> The catalog, agent, and TUI layers are being built on top.
+> **Status:** the terminal app works end to end — client, agent, and TUI.
+> Serving it over SSH with Wish is the next step and is not built yet.
 
 ## Why
 
@@ -89,11 +89,25 @@ webshim doctor
 ## Usage
 
 ```sh
-webshim                       # the TUI
-webshim ls <alias>            # inspect a project
-webshim publish <alias> <dir> # publish a directory
-webshim rollback <alias> <v>  # make an earlier revision current
-webshim doctor                # verify credentials and connectivity
+webshim                        # the TUI
+webshim ask <alias> "..."      # one agent turn, no TUI
+webshim ls <alias>             # inspect a project
+webshim publish <alias> <dir>  # publish a file or directory
+webshim rollback <alias> <v>   # make an earlier revision current
+webshim models                 # list usable providers and models
+webshim doctor                 # verify credentials and connectivity
+```
+
+Inside the TUI, type what you want and press enter. The agent edits a local copy
+under `projects/<alias>/`, and publishing uploads only what changed.
+
+```
+/sync              pull the live revision down
+/publish [note]    publish local changes
+/diff              what changed locally
+/rollback <ver>    make an earlier revision live
+/mode manual|normal|yolo
+/tools /cost /model /clear /help
 ```
 
 The non-TUI commands print the playbook's output contract as JSON, so they
