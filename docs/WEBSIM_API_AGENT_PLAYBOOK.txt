@@ -1,0 +1,978 @@
+WEBSIM API AGENT PLAYBOOK
+Operational instructions for AI agents and coding agents
+Generated: 2026-08-05
+
+======================================================================
+SYSTEM PURPOSE
+======================================================================
+
+You are operating WebSim projects through reverse-engineered WebSim web-app
+APIs. These endpoints are not guaranteed to be a stable public API. Your job
+is to make the smallest safe change, verify every state transition, preserve
+rollback options, and never expose credentials.
+
+Base API:
+
+  https://websim.com/api/v1
+
+Raw project content host:
+
+  https://{PROJECT_ID}.c.websim.com/{PATH}?v={VERSION}&raw=
+
+Canonical local implementation:
+
+  websim-ai-agent/mcp-server.js
+  websim-ai-agent/websim-comment.js
+
+If this playbook conflicts with the current implementation, inspect the code
+and follow the implementation. Do not invent endpoints, fields, response
+shapes, or authentication behavior.
+
+======================================================================
+NON-NEGOTIABLE RULES
+======================================================================
+
+1. Never print, quote, summarize, upload, commit, or reveal a bearer token.
+2. Never embed a bearer token in HTML, CSS, JavaScript, or another client file.
+3. Never edit a finalized revision. Branch a new draft from a published parent.
+4. Never set a draft revision as current. Finalize it first and verify it.
+5. Never declare success until GET /projects/{id} confirms current_version.
+6. Never overwrite an asset without first resolving its existing asset ID.
+7. Never manually set multipart Content-Type when using FormData.
+8. Never use an absolute project path or a path containing "..".
+9. Never create duplicate homepages such as "index (1).html". The homepage is
+   index.html and this implementation updates it through POST /sites.
+10. Never retry 401 or 403 blindly. Treat them as auth/permission failures.
+11. Never run concurrent edit flows against the same project unless an
+    external project lock guarantees serialization.
+12. Never delete a project or revision as an inferred recovery action.
+13. Preserve the previous current_version until the new version is verified.
+14. Redact Authorization headers and tokens from logs and error reports.
+15. When the API response shape differs from this playbook, stop mutation,
+    retain the last known live version, and report the unexpected shape.
+
+======================================================================
+AUTHENTICATION RESOLUTION
+======================================================================
+
+Resolve authentication in this exact order:
+
+  1. Project-specific `bearer` value from projects.config.json.
+  2. WEBSIM_BEARER environment variable.
+  3. `bearer` environment variable, retained for compatibility.
+  4. WEBSIM_TOKEN environment variable.
+  5. authToken from WEBSIM_CLI_CONFIG, if that environment variable points to
+     a WebSim CLI config file.
+  6. authToken from ~/.websim-cli.json.
+
+If no token is available, stop and tell the operator to run:
+
+  websim-cli login
+
+Do not ask the operator to paste a token into chat if CLI login is available.
+
+Standard authenticated headers:
+
+  Authorization: Bearer {TOKEN}
+  Accept: */*
+  Origin: https://websim.com
+
+For JSON bodies, add:
+
+  Content-Type: application/json
+
+For comment calls, also add:
+
+  Referer: https://websim.com/{PROJECT_SLUG}
+
+For FormData, do not add Content-Type. The HTTP runtime generates the boundary.
+
+Optional authentication validation:
+
+  GET /session
+
+Expected useful field:
+
+  response.user.username
+
+If GET /session returns 401 or 403, stop. Do not attempt mutations.
+
+======================================================================
+PROJECT IDENTIFICATION
+======================================================================
+
+Resolve a project alias from projects.config.json. Required project fields:
+
+  id    Stable project ID used in API paths and content-host domains.
+  slug  Human-facing slug used in comment Referer headers.
+
+If an alias is omitted, use config.defaultProject. If the alias does not
+exist, stop and list known aliases. Never guess an ID from a title or slug.
+
+Before mutation, fetch project state:
+
+  GET /projects/{PROJECT_ID}
+
+Accept either response shape:
+
+  { "project": { ... } }
+
+or a bare project object:
+
+  { "id": "...", "current_version": 12, ... }
+
+Normalize as:
+
+  project = response.project ?? response
+
+Require project.current_version to be an integer before a normal edit flow.
+
+======================================================================
+CORE STATE MACHINE
+======================================================================
+
+Published project editing is a state machine:
+
+  LIVE PUBLISHED REVISION
+          |
+          | POST revisions with parent_version
+          v
+  NEW DRAFT REVISION
+          |
+          | update homepage/assets
+          v
+  MODIFIED DRAFT
+          |
+          | PATCH revision {draft:false}
+          v
+  FINALIZED REVISION
+          |
+          | PATCH project {current_version:newVersion}
+          v
+  LIVE NEW REVISION
+          |
+          | GET project and verify
+          v
+  VERIFIED SUCCESS
+
+At any failure before promotion, leave the existing live version unchanged.
+At any ambiguous failure during promotion, GET project state before retrying.
+
+======================================================================
+FLOW A: INSPECT A PROJECT WITHOUT CHANGING IT
+======================================================================
+
+1. Resolve token and project ID.
+2. GET /projects/{id}.
+3. Store current_version.
+4. GET /projects/{id}/revisions.
+5. Find revisions.data[].project_revision where version=current_version.
+6. Require draft=false for the live revision.
+7. GET /projects/{id}/revisions/{version}/assets.
+8. Download index.html from the raw content host if content inspection is
+   required.
+9. Make no mutation calls.
+
+Raw download:
+
+  GET https://{id}.c.websim.com/index.html?v={version}&raw=
+
+Headers:
+
+  Accept: */*
+  Referer: https://websim.com/p/{id}/{version}
+
+For nested paths, URL-encode each path segment separately. Do not encode `/`
+as part of a single whole-path operation.
+
+======================================================================
+FLOW B: CREATE AND PUBLISH A NORMAL EDIT
+======================================================================
+
+PRECONDITIONS
+
+  - Authentication validated or already known valid.
+  - Project ID resolved from configuration, not guessed.
+  - No other edit flow is active for this project.
+  - The requested change is authorized.
+  - Current live version has been captured as PREVIOUS_VERSION.
+
+STEP 1: Read current project
+
+  GET /projects/{id}
+
+Require integer current_version. Save it as PREVIOUS_VERSION.
+
+STEP 2: Confirm parent is published
+
+  GET /projects/{id}/revisions
+
+Locate PREVIOUS_VERSION and require draft=false.
+
+STEP 3: Create draft
+
+  POST /projects/{id}/revisions
+  Content-Type: application/json
+
+Body:
+
+  {"parent_version": PREVIOUS_VERSION}
+
+Require response.project_revision.version and response.project_revision.id.
+Require response.project_revision.draft=true. Save:
+
+  NEW_VERSION
+  NEW_REVISION_ID
+
+STEP 4: Apply edits
+
+  Homepage index.html -> use FLOW C.
+  Other files/assets   -> use FLOW D.
+
+STEP 5: Inspect draft assets if relevant
+
+  GET /projects/{id}/revisions/{NEW_VERSION}/assets
+
+Verify expected asset paths are present. For a homepage edit, POST /sites is
+the primary write and raw download can be used for content verification when
+the draft content host exposes it.
+
+STEP 6: Finalize draft
+
+  PATCH /projects/{id}/revisions/{NEW_VERSION}
+
+Body:
+
+  {"draft":false}
+
+STEP 7: Verify finalization
+
+  GET /projects/{id}/revisions
+
+Locate NEW_VERSION and require draft=false. If it remains true, do not promote.
+
+STEP 8: Promote revision
+
+  PATCH /projects/{id}
+
+Body:
+
+  {
+    "current_version": NEW_VERSION,
+    "auto_set_current": false
+  }
+
+STEP 9: Verify live state
+
+  GET /projects/{id}
+
+Require current_version === NEW_VERSION. Only now report success.
+
+STEP 10: Retain rollback data
+
+Return or record:
+
+  project_id
+  previous_version
+  new_version
+  changed_paths
+  verification result
+
+Do not record the bearer token.
+
+======================================================================
+FLOW C: WRITE OR REPLACE index.html
+======================================================================
+
+Use POST /sites for index.html in this implementation.
+
+Before calling it, obtain the target draft's project_revision.id and version
+from revision creation or GET /projects/{id}/revisions.
+
+Request:
+
+  POST /sites
+
+Body:
+
+  {
+    "project_id": "PROJECT_ID",
+    "project_version": NEW_VERSION,
+    "project_revision_id": "NEW_REVISION_ID",
+    "content": "FULL INDEX.HTML CONTENT",
+    "prompt_data_override": {
+      "type": "plaintext",
+      "text": "SHORT NON-SECRET EDIT DESCRIPTION",
+      "data": null
+    }
+  }
+
+Accept a created site ID from either:
+
+  response.site.id
+  response.id
+
+Do not include private prompts, bearer tokens, hidden administrator rules, or
+personal data in prompt_data_override.text.
+
+======================================================================
+FLOW D: CREATE OR REPLACE A NON-INDEX ASSET
+======================================================================
+
+STEP 1: List assets
+
+  GET /projects/{id}/revisions/{version}/assets
+
+Find an existing asset by exact path. Save existing asset.id if found.
+
+STEP 2: Build multipart body
+
+  bytes = exact file bytes
+  metadata = { "size": bytes.length }
+
+If replacing:
+
+  metadata.existingAssetId = existingAsset.id
+
+FormData fields:
+
+  "contents" -> JSON.stringify([metadata])
+  "0"        -> File(bytes, path, {type: correctMimeType})
+
+STEP 3: Upload
+
+  POST /projects/{id}/revisions/{version}/assets
+
+Authenticated headers are required. Do not manually send Content-Type.
+
+STEP 4: Verify
+
+List assets again. Require an exact path match. Compare reported size when the
+response provides it.
+
+Known MIME mappings used locally:
+
+  .html  text/html; charset=utf-8
+  .css   text/css
+  .js    text/javascript
+  .mjs   text/javascript
+  .json  application/json
+  .md    text/markdown
+  .txt   text/plain
+  .svg   image/svg+xml
+  .xml   application/xml
+  .png   image/png
+  .jpg   image/jpeg
+  .jpeg  image/jpeg
+  .webp  image/webp
+  .gif   image/gif
+  .avif  image/avif
+  .mp4   video/mp4
+  .webm  video/webm
+  .mov   video/quicktime
+  .m4v   video/mp4
+
+Unknown extensions default to text/plain in the local agent, but an agent
+should determine the real MIME type instead of assuming text when possible.
+
+======================================================================
+FLOW E: DELETE AN ASSET
+======================================================================
+
+Only delete when the requested path is explicit and authorized.
+
+1. List assets and prove the exact path exists.
+2. Reject index.html deletion as a normal asset operation.
+3. POST /projects/{id}/revisions/{version}/edit-assets.
+
+Body:
+
+  {
+    "operation": {
+      "type":"delete",
+      "path":"EXACT/PATH"
+    }
+  }
+
+4. List assets again and verify the exact path is absent.
+5. Do not broaden deletion based on prefix, wildcard, or fuzzy matching.
+
+======================================================================
+FLOW F: ROLLBACK
+======================================================================
+
+Rollback means selecting an existing published revision as current. It does
+not mean deleting newer revisions.
+
+1. GET /projects/{id}/revisions.
+2. Locate TARGET_VERSION exactly.
+3. Require target.draft=false.
+4. Save the current current_version as PRE_ROLLBACK_VERSION.
+5. PATCH /projects/{id} with:
+
+   {
+     "current_version": TARGET_VERSION,
+     "auto_set_current": false
+   }
+
+6. GET /projects/{id} and require current_version === TARGET_VERSION.
+7. Optionally sync the target version into the local project mirror.
+8. Report both TARGET_VERSION and PRE_ROLLBACK_VERSION.
+
+If promotion returns a network error, GET project state before retrying. The
+first request may have succeeded even if its response was lost.
+
+======================================================================
+FLOW G: CREATE A NEW PROJECT
+======================================================================
+
+STEP 1: Create
+
+  POST /projects?include[]=permissions
+
+Body:
+
+  {"visibility":"public"}
+
+Require:
+
+  response.project.id
+  response.project_revision.id
+  response.project_revision.version
+
+STEP 2: Update metadata
+
+  PATCH /projects/{new_id}?include[]=permissions
+
+Allowed known fields:
+
+  title
+  description
+  slug
+  visibility
+  comments_mode
+  enable_chat
+  posted
+
+Sanitize slug to lowercase letters/numbers and hyphens. Do not assume a slug
+is available merely because the PATCH request was accepted; inspect response.
+
+STEP 3: Upload initial non-index files
+
+Use FLOW D. The local !newproj implementation uploads own.txt as a canonical
+owner marker. Treat ownership metadata as security-sensitive project state.
+
+STEP 4: Write initial index.html
+
+Use FLOW C with the initial revision ID/version.
+
+STEP 5: Finalize
+
+PATCH the initial revision with {"draft":false}.
+
+STEP 6: Make current
+
+PATCH the project with current_version and auto_set_current=false.
+
+STEP 7: Verify
+
+GET the project. Require current_version to match the created version.
+
+======================================================================
+FLOW H: COMMENTS
+======================================================================
+
+All comment requests use:
+
+  Authorization: Bearer {TOKEN}
+  Accept: */*
+  Origin: https://websim.com
+  Referer: https://websim.com/{PROJECT_SLUG}
+
+List top-level comments:
+
+  GET /projects/{id}/comments?first={LIMIT}&sort_by=created_at&only_video=false
+
+Normalize result:
+
+  comments = (response.comments?.data ?? []).map(x => x.comment)
+
+List replies:
+
+  GET /projects/{id}/comments/{comment_id}/replies?last={LIMIT}
+
+Normalize result the same way.
+
+Post top-level comment:
+
+  POST /projects/{id}/comments
+  {"content":"TEXT"}
+
+Post reply:
+
+  POST /projects/{id}/comments
+  {
+    "content":"TEXT",
+    "parent_comment_id":"PARENT_ID"
+  }
+
+Delete comment:
+
+  DELETE /projects/{id}/comments/{comment_id}
+
+Do not post duplicate replies after an ambiguous timeout. Re-list replies and
+check for the intended content/author before retrying.
+
+======================================================================
+ENDPOINT CONTRACT SUMMARY
+======================================================================
+
+GET /session
+  Auth: bearer
+  Reads: current user/session
+
+POST /projects?include[]=permissions
+  Auth: bearer
+  JSON: {visibility}
+  Creates: project plus initial draft revision
+
+GET /projects/{id}
+  Auth: bearer
+  Reads: metadata and current_version
+
+PATCH /projects/{id}[?include[]=permissions]
+  Auth: bearer
+  JSON: metadata fields or current_version
+  Mutates: project metadata/live revision
+
+GET /projects/{id}/revisions
+  Auth: bearer
+  Reads: revisions.data[].project_revision and optional .site
+
+POST /projects/{id}/revisions
+  Auth: bearer
+  JSON: {parent_version}
+  Creates: draft revision
+
+PATCH /projects/{id}/revisions/{version}
+  Auth: bearer
+  JSON: {draft:false}
+  Mutates: finalizes revision
+
+GET /projects/{id}/revisions/{version}/edit-history
+  Auth: bearer
+  Reads: edits[]
+
+GET /projects/{id}/revisions/{version}/assets
+  Auth: bearer
+  Reads: assets[]
+
+POST /projects/{id}/revisions/{version}/assets
+  Auth: bearer
+  Multipart: contents metadata plus numbered file fields
+  Mutates: creates/replaces asset
+
+POST /projects/{id}/revisions/{version}/edit-assets
+  Auth: bearer
+  JSON: operation object
+  Mutates: asset edit/delete
+
+POST /sites
+  Auth: bearer
+  JSON: project/revision IDs, content, prompt_data_override
+  Mutates: homepage/site content for a revision
+
+GET /projects/{id}/comments
+GET /projects/{id}/comments/{comment_id}/replies
+POST /projects/{id}/comments
+DELETE /projects/{id}/comments/{comment_id}
+  Auth: bearer plus project Referer
+  Reads/mutates: project comments
+
+GET https://{id}.c.websim.com/{path}?v={version}&raw=
+  Auth: none in current implementation
+  Reads: raw project content
+
+======================================================================
+RESPONSE NORMALIZATION
+======================================================================
+
+Use defensive parsing only for shapes already observed by the implementation:
+
+Project:
+
+  const project = body.project ?? body;
+
+Revisions:
+
+  const revisions = (body.revisions?.data ?? [])
+    .map(row => row.project_revision)
+    .filter(Boolean);
+
+Comments/replies:
+
+  const comments = (body.comments?.data ?? [])
+    .map(row => row.comment)
+    .filter(Boolean);
+
+Assets:
+
+  const assets = body.assets ?? [];
+
+Site ID:
+
+  const siteId = body.site?.id ?? body.id ?? null;
+
+Do not fabricate defaults for required mutation identifiers. Missing project
+ID, revision ID, revision version, or current_version is a hard stop.
+
+======================================================================
+RETRY AND TIMEOUT POLICY
+======================================================================
+
+Retry candidates:
+
+  HTTP 408
+  HTTP 409
+  HTTP 425
+  HTTP 429
+  HTTP 500-599
+  network reset
+  DNS temporary failure
+  connection timeout
+
+Do not automatically retry:
+
+  HTTP 400 without correcting the request
+  HTTP 401
+  HTTP 403
+  HTTP 404 without re-checking IDs/version/path
+  destructive or duplicate-producing POST after an ambiguous response
+
+Default policy matching the local WebSim helper:
+
+  max attempts: 4
+  request timeout: 30 seconds
+  exponential delay: 750 ms, 1500 ms, 3000 ms
+  delay cap: 15 seconds
+
+For 429, honor Retry-After when present. Add jitter in multi-agent systems.
+
+IDEMPOTENCY RULE
+
+GET is safe to retry. PATCH to a desired final value is usually safe after
+re-reading state. POST may create duplicates. After a POST timeout, inspect
+server state before retrying.
+
+======================================================================
+ERROR DECISION TABLE
+======================================================================
+
+401 Unauthorized
+  Stop. Token is missing, expired, malformed, or rejected.
+
+403 Forbidden
+  Stop. Account probably lacks permission. Do not rotate or guess accounts.
+
+404 Not Found
+  Re-check project ID, revision version, comment ID, or asset path. Do not
+  create a replacement automatically unless that is the requested operation.
+
+409 Conflict
+  Re-read current project/revision state. Retry only if the operation is still
+  valid and cannot produce a duplicate.
+
+429 Too Many Requests
+  Back off. Honor Retry-After. Do not fan out parallel requests.
+
+5xx / timeout
+  Retry read operations with backoff. For mutations, re-read state first when
+  the result may have been committed despite a lost response.
+
+Unexpected JSON or missing required fields
+  Stop mutation. Preserve previous live version. Report a likely API change.
+
+======================================================================
+ROLLBACK AND FAILURE RECOVERY
+======================================================================
+
+Before editing, always save PREVIOUS_VERSION.
+
+If asset or homepage upload fails:
+  Leave the draft unpromoted. Existing live version remains safe.
+
+If finalization fails:
+  Re-list revisions. If draft is still true, do not promote.
+
+If promotion fails:
+  GET project state. If current_version is NEW_VERSION, promotion succeeded.
+  If it remains PREVIOUS_VERSION, retry only when safe.
+  If it is a third version, stop: another actor changed the project.
+
+If post-promotion verification fails:
+  Do not claim success. Re-read revisions and project state. An authorized
+  operator may restore PREVIOUS_VERSION with the rollback flow.
+
+Never delete the failed draft as an automatic cleanup action. Keeping it can
+help diagnosis, and deletion behavior is not documented here.
+
+======================================================================
+CONCURRENCY CONTROL
+======================================================================
+
+Use one lock per project ID around the entire mutation flow, beginning before
+reading current_version and ending after verification. A lock around only the
+upload step is insufficient.
+
+Required critical section:
+
+  acquire project lock
+  read current version
+  create draft
+  write changes
+  finalize
+  promote
+  verify
+  release project lock
+
+If a second actor changes current_version before promotion, stop and rebase by
+creating a new draft from the new current version. Do not blindly promote a
+stale branch unless explicitly authorized.
+
+======================================================================
+PATH AND MEDIA SAFETY
+======================================================================
+
+Reject paths that:
+
+  are absolute
+  contain a path component exactly equal to ".."
+  match index (number).html, case-insensitively
+
+Current local media defaults:
+
+  maximum media bytes: 524,288,000 (500 MiB)
+  maximum video duration: 1,800 seconds (30 minutes)
+
+Before downloading media:
+
+  1. HEAD the raw URL.
+  2. Require successful status.
+  3. Require a numeric Content-Length.
+  4. Enforce the byte limit.
+  5. GET and enforce the limit again on actual bytes.
+
+Before uploading video:
+
+  1. Enforce byte limit.
+  2. Verify duration with ffprobe.
+  3. Reject unverifiable or over-limit video.
+  4. Apply configured moderation controls.
+
+These are local safety policies, not proof of WebSim platform limits.
+
+======================================================================
+AGENT OUTPUT CONTRACT
+======================================================================
+
+After a successful mutation, report only non-secret operational facts:
+
+  action
+  project alias or ID
+  previous version
+  new/current version
+  changed paths
+  verification status
+
+Example:
+
+  {
+    "ok": true,
+    "action": "publish_edit",
+    "project": "demo",
+    "previous_version": 11,
+    "current_version": 12,
+    "changed_paths": ["index.html", "assets/logo.png"],
+    "verified": true
+  }
+
+On failure, report:
+
+  operation that failed
+  HTTP status when available
+  sanitized short error body
+  whether live state changed
+  last verified current_version
+  safe next action
+
+Never include request headers, raw environment variables, CLI config contents,
+or tokens.
+
+======================================================================
+MINIMAL JAVASCRIPT REFERENCE IMPLEMENTATION
+======================================================================
+
+  const API = 'https://websim.com/api/v1';
+
+  function authHeaders(token) {
+    return {
+      authorization: `Bearer ${token}`,
+      accept: '*/*',
+      origin: 'https://websim.com'
+    };
+  }
+
+  async function parseResponse(res) {
+    const text = await res.text();
+    if (!res.ok) {
+      throw new Error(`WebSim ${res.status}: ${text.slice(0, 500)}`);
+    }
+    return text ? JSON.parse(text) : null;
+  }
+
+  async function getProject(projectId, token) {
+    const body = await parseResponse(await fetch(
+      `${API}/projects/${projectId}`,
+      { headers: authHeaders(token) }
+    ));
+    return body.project ?? body;
+  }
+
+  async function listRevisions(projectId, token) {
+    const body = await parseResponse(await fetch(
+      `${API}/projects/${projectId}/revisions`,
+      { headers: authHeaders(token) }
+    ));
+    return (body.revisions?.data ?? [])
+      .map(row => row.project_revision)
+      .filter(Boolean);
+  }
+
+  async function publishHomepage(projectId, html, token) {
+    const headers = authHeaders(token);
+    const jsonHeaders = { ...headers, 'content-type': 'application/json' };
+
+    const before = await getProject(projectId, token);
+    if (!Number.isInteger(before.current_version)) {
+      throw new Error('Missing integer current_version');
+    }
+    const previousVersion = before.current_version;
+
+    const beforeRevisions = await listRevisions(projectId, token);
+    const parent = beforeRevisions.find(r => r.version === previousVersion);
+    if (!parent || parent.draft) {
+      throw new Error('Current revision is missing or still draft');
+    }
+
+    const created = await parseResponse(await fetch(
+      `${API}/projects/${projectId}/revisions`,
+      {
+        method: 'POST',
+        headers: jsonHeaders,
+        body: JSON.stringify({ parent_version: previousVersion })
+      }
+    ));
+    const revision = created.project_revision;
+    if (!revision?.id || !Number.isInteger(revision.version)) {
+      throw new Error('Create response missing revision identity');
+    }
+
+    await parseResponse(await fetch(`${API}/sites`, {
+      method: 'POST',
+      headers: jsonHeaders,
+      body: JSON.stringify({
+        project_id: projectId,
+        project_version: revision.version,
+        project_revision_id: revision.id,
+        content: html,
+        prompt_data_override: {
+          type: 'plaintext',
+          text: 'automated homepage edit',
+          data: null
+        }
+      })
+    }));
+
+    await parseResponse(await fetch(
+      `${API}/projects/${projectId}/revisions/${revision.version}`,
+      {
+        method: 'PATCH',
+        headers: jsonHeaders,
+        body: JSON.stringify({ draft: false })
+      }
+    ));
+
+    const finalized = await listRevisions(projectId, token);
+    const newMeta = finalized.find(r => r.version === revision.version);
+    if (!newMeta || newMeta.draft) {
+      throw new Error('Revision finalization verification failed');
+    }
+
+    await parseResponse(await fetch(`${API}/projects/${projectId}`, {
+      method: 'PATCH',
+      headers: jsonHeaders,
+      body: JSON.stringify({
+        current_version: revision.version,
+        auto_set_current: false
+      })
+    }));
+
+    const after = await getProject(projectId, token);
+    if (after.current_version !== revision.version) {
+      throw new Error(
+        `Promotion verification failed: expected ${revision.version}, ` +
+        `received ${after.current_version}`
+      );
+    }
+
+    return {
+      ok: true,
+      project_id: projectId,
+      previous_version: previousVersion,
+      current_version: revision.version,
+      changed_paths: ['index.html'],
+      verified: true
+    };
+  }
+
+======================================================================
+PRE-FLIGHT CHECKLIST
+======================================================================
+
+Before any mutation, confirm all items:
+
+  [ ] The requested action is authorized.
+  [ ] Project alias resolved to an exact ID.
+  [ ] Auth token resolved without displaying it.
+  [ ] The project lock is held.
+  [ ] GET project succeeded.
+  [ ] current_version is an integer.
+  [ ] The parent revision exists and draft=false.
+  [ ] The requested paths are safe.
+  [ ] A rollback version is recorded.
+  [ ] No concurrent edit flow is active.
+
+======================================================================
+POST-FLIGHT CHECKLIST
+======================================================================
+
+Before reporting success, confirm all items:
+
+  [ ] All intended writes returned successful HTTP statuses.
+  [ ] The new revision exists.
+  [ ] The new revision has draft=false.
+  [ ] GET project reports current_version=NEW_VERSION.
+  [ ] Expected assets are present.
+  [ ] No token or Authorization header was logged.
+  [ ] Previous version and changed paths are recorded for rollback.
+  [ ] Project lock is released.
+
+======================================================================
+FINAL REMINDER TO THE AGENT
+======================================================================
+
+WebSim's internal API may change. Be conservative. Read before writing, branch
+before editing, finalize before promoting, verify after every mutation, and
+keep the old live version available. When state is ambiguous, stop and inspect
+instead of guessing.
+

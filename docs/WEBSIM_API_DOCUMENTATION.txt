@@ -1,0 +1,616 @@
+WEBSIM API DOCUMENTATION
+Reverse-engineered from the local websim-ai-agent implementation
+Generated: 2026-08-05
+
+======================================================================
+1. SCOPE AND IMPORTANT WARNING
+======================================================================
+
+This document describes the WebSim HTTP endpoints actually used by the
+websim-ai-agent in this workspace. They appear to be WebSim's internal web
+application API, not a formally versioned public developer API. They can
+change without notice. Test calls against a disposable project before using
+them for anything important.
+
+Never paste a bearer token into source code, a public repository, browser-side
+JavaScript, logs, or screenshots. The local agent finds credentials in this
+priority order:
+
+  1. A per-project "bearer" value in projects.config.json
+  2. WEBSIM_BEARER, bearer, or WEBSIM_TOKEN environment variable
+  3. authToken in ~/.websim-cli.json, created by `websim-cli login`
+
+Recommended: use the official CLI login and read the token at runtime.
+
+Base API URL:
+
+  https://websim.com/api/v1
+
+Common authenticated headers:
+
+  Authorization: Bearer YOUR_TOKEN
+  Accept: */*
+  Origin: https://websim.com
+
+Comment requests also send:
+
+  Referer: https://websim.com/PROJECT_SLUG
+
+JSON requests additionally send:
+
+  Content-Type: application/json
+
+Examples below use shell variables only as placeholders:
+
+  TOKEN='your-token'
+  PROJECT_ID='your-project-id'
+  VERSION='1'
+  SLUG='your-project-slug'
+
+======================================================================
+2. DATA MODEL AND NORMAL EDITING WORKFLOW
+======================================================================
+
+The important identifiers are:
+
+  project.id               Stable project identifier.
+  project.slug             Human-readable URL slug.
+  project.current_version  Revision currently shown live.
+  project_revision.id      Internal revision UUID/ID.
+  project_revision.version User-visible integer revision number.
+  project_revision.draft   true while editable, false when finalized.
+
+The reliable edit lifecycle used by the agent is:
+
+  1. GET project metadata to learn current_version.
+  2. POST /projects/{id}/revisions with parent_version=current_version.
+  3. Upload non-index assets to the new draft revision.
+  4. POST /sites to update index.html for that draft revision.
+  5. PATCH the revision with {"draft":false}.
+  6. PATCH the project with the new current_version.
+  7. GET project metadata again and verify the live version changed.
+
+Do not make a draft current. Finalize it first. The agent treats published
+revisions as immutable and branches a new draft for every edit.
+
+======================================================================
+3. AUTHENTICATION AND SESSION
+======================================================================
+
+GET /session
+
+Purpose:
+  Inspect the account represented by the current bearer token. The agent uses
+  this after project creation to read user.username.
+
+Example:
+
+  curl 'https://websim.com/api/v1/session' \
+    -H "Authorization: Bearer $TOKEN" \
+    -H 'Accept: */*' \
+    -H 'Origin: https://websim.com'
+
+Observed response field:
+
+  {
+    "user": {
+      "username": "example-user"
+    }
+  }
+
+Official CLI authentication flow (researched from websim-cli 0.2.1):
+
+  POST /auth/cli/initiate
+  Poll /auth/cli/poll
+
+The CLI opens a browser for approval and saves {"authToken":"..."} in
+~/.websim-cli.json with mode 0600. Prefer running `websim-cli login` instead
+of implementing or imitating this login flow yourself.
+
+======================================================================
+4. PROJECT ENDPOINTS
+======================================================================
+
+4.1 Create a blank project
+
+POST /projects?include[]=permissions
+
+Request body used by the agent:
+
+  {"visibility":"public"}
+
+Example:
+
+  curl -X POST \
+    'https://websim.com/api/v1/projects?include[]=permissions' \
+    -H "Authorization: Bearer $TOKEN" \
+    -H 'Content-Type: application/json' \
+    -H 'Origin: https://websim.com' \
+    --data '{"visibility":"public"}'
+
+Observed response fields:
+
+  {
+    "project": { "id": "..." },
+    "project_revision": {
+      "id": "...",
+      "version": 1,
+      "draft": true
+    }
+  }
+
+The response creates both the project and its initial draft revision.
+
+4.2 Get project metadata
+
+GET /projects/{project_id}
+
+Used to read current_version and verify publication/rollback operations.
+
+Observed shape may be either a bare project object or:
+
+  { "project": { "id":"...", "current_version":12, ... } }
+
+Code should tolerate both shapes because the local agent does.
+
+4.3 Update project metadata
+
+PATCH /projects/{project_id}?include[]=permissions
+
+Known fields used or exposed by the agent:
+
+  title            string
+  description      string
+  slug             string
+  visibility       string, commonly "public"
+  comments_mode    string
+  enable_chat      boolean
+  posted           boolean
+  current_version  integer
+
+Example:
+
+  curl -X PATCH \
+    "https://websim.com/api/v1/projects/$PROJECT_ID?include[]=permissions" \
+    -H "Authorization: Bearer $TOKEN" \
+    -H 'Content-Type: application/json' \
+    -H 'Origin: https://websim.com' \
+    --data '{"title":"My Fun Idea","slug":"my-fun-idea","description":"A test"}'
+
+Do not send unknown fields casually. Internal APIs may accept, reject, or
+silently reinterpret them.
+
+4.4 Set the live revision
+
+PATCH /projects/{project_id}
+
+Body:
+
+  {"current_version":12,"auto_set_current":false}
+
+The agent immediately GETs the project afterward and checks that
+current_version is exactly the requested version.
+
+======================================================================
+5. REVISION ENDPOINTS
+======================================================================
+
+5.1 List revisions
+
+GET /projects/{project_id}/revisions
+
+Observed response path:
+
+  revisions.data[].project_revision
+
+Useful revision fields:
+
+  id
+  version
+  draft
+  parent_revision_version
+  project_id
+  created_at
+
+The response can also include revisions.data[].site. The agent reads:
+
+  site.prompt.text
+  site.title
+
+5.2 Create a draft revision
+
+POST /projects/{project_id}/revisions
+
+Body:
+
+  {"parent_version":11}
+
+Observed response:
+
+  {
+    "project_revision": {
+      "id":"...",
+      "version":12,
+      "draft":true,
+      "parent_revision_version":11
+    }
+  }
+
+Example:
+
+  curl -X POST \
+    "https://websim.com/api/v1/projects/$PROJECT_ID/revisions" \
+    -H "Authorization: Bearer $TOKEN" \
+    -H 'Content-Type: application/json' \
+    -H 'Origin: https://websim.com' \
+    --data '{"parent_version":11}'
+
+5.3 Finalize/publish a draft
+
+PATCH /projects/{project_id}/revisions/{version}
+
+Body:
+
+  {"draft":false}
+
+After this call, the agent lists revisions again and verifies draft is false.
+Finalizing does not necessarily make the version live; update the project's
+current_version separately.
+
+5.4 Get revision edit history
+
+GET /projects/{project_id}/revisions/{version}/edit-history
+
+Observed response path:
+
+  edits[]
+
+Fields used by the agent:
+
+  edit.id
+  edit.created_at
+  edit.data.type
+  edit.data.path
+  edit.new_path
+  edit.old_path
+  edit.by
+
+======================================================================
+6. HOMEPAGE / SITE CONTENT ENDPOINT
+======================================================================
+
+POST /sites
+
+This is how the agent writes index.html. It does not upload index.html through
+the normal asset endpoint. First list revisions and obtain the target draft's
+project_revision.id and version.
+
+Body:
+
+  {
+    "project_id": "PROJECT_ID",
+    "project_version": 12,
+    "project_revision_id": "REVISION_INTERNAL_ID",
+    "content": "<!doctype html>...",
+    "prompt_data_override": {
+      "type": "plaintext",
+      "text": "description of this edit",
+      "data": null
+    }
+  }
+
+Observed response fields:
+
+  site.id
+
+Some responses may put id at the top level. The agent accepts either
+body.site.id or body.id.
+
+Example with a JSON file is safer than shell-escaping HTML:
+
+  curl -X POST 'https://websim.com/api/v1/sites' \
+    -H "Authorization: Bearer $TOKEN" \
+    -H 'Content-Type: application/json' \
+    -H 'Origin: https://websim.com' \
+    --data @site-request.json
+
+======================================================================
+7. ASSET / FILE ENDPOINTS
+======================================================================
+
+7.1 List assets
+
+GET /projects/{project_id}/revisions/{version}/assets
+
+Observed response:
+
+  {
+    "assets": [
+      {
+        "id":"...",
+        "path":"style.css",
+        "size":1234,
+        "content_type":"text/css"
+      }
+    ]
+  }
+
+7.2 Create or replace an asset
+
+POST /projects/{project_id}/revisions/{version}/assets
+
+Content-Type is multipart/form-data and must include:
+
+  Field "contents": JSON string containing an array of metadata objects.
+  Field "0":       The first uploaded file.
+
+For a new file:
+
+  contents = [{"size":1234}]
+
+For replacement of an existing asset:
+
+  contents = [{"size":1234,"existingAssetId":"ASSET_ID"}]
+
+The local agent constructs this with JavaScript FormData:
+
+  const bytes = Buffer.from(fileContents);
+  const metadata = { size: bytes.length };
+  if (existingAssetId) metadata.existingAssetId = existingAssetId;
+
+  const form = new FormData();
+  form.append('contents', JSON.stringify([metadata]));
+  form.append('0', new File([bytes], path, { type: mimeType }));
+
+  await fetch(
+    `${API}/projects/${projectId}/revisions/${version}/assets`,
+    { method: 'POST', headers: authHeadersWithoutContentType, body: form }
+  );
+
+Do not manually set Content-Type for FormData; the runtime must add the
+multipart boundary. To replace a file, first list assets and find its id by
+matching asset.path.
+
+7.3 Delete an asset
+
+POST /projects/{project_id}/revisions/{version}/edit-assets
+
+Body:
+
+  {
+    "operation": {
+      "type":"delete",
+      "path":"style.css"
+    }
+  }
+
+7.4 Download raw project files
+
+Files are served from a per-project content host rather than /api/v1:
+
+  GET https://{project_id}.c.websim.com/{encoded_path}?v={version}&raw=
+
+Example:
+
+  curl -L \
+    "https://$PROJECT_ID.c.websim.com/index.html?v=$VERSION&raw=" \
+    -H 'Accept: */*' \
+    -H "Referer: https://websim.com/p/$PROJECT_ID/$VERSION"
+
+Every path segment should be URL-encoded independently. The agent uses HEAD
+first for media to verify Content-Length, then GETs the file. Downloads in the
+current implementation do not send the bearer token to the content host.
+
+======================================================================
+8. COMMENT ENDPOINTS
+======================================================================
+
+8.1 List top-level comments
+
+GET /projects/{project_id}/comments
+
+Query parameters used by the agent:
+
+  first={limit}
+  sort_by=created_at
+  only_video=false
+
+Full example:
+
+  GET /projects/{id}/comments?first=20&sort_by=created_at&only_video=false
+
+Observed response path:
+
+  comments.data[].comment
+
+8.2 List replies
+
+GET /projects/{project_id}/comments/{comment_id}/replies?last={limit}
+
+Observed response path:
+
+  comments.data[].comment
+
+8.3 Post a top-level comment
+
+POST /projects/{project_id}/comments
+
+Body:
+
+  {"content":"Hello from the API"}
+
+8.4 Post a reply
+
+POST /projects/{project_id}/comments
+
+Body:
+
+  {
+    "content":"This is a reply",
+    "parent_comment_id":"PARENT_COMMENT_ID"
+  }
+
+There is no separate reply POST endpoint in the local implementation.
+
+8.5 Delete a comment
+
+DELETE /projects/{project_id}/comments/{comment_id}
+
+Comment requests should include Authorization, Origin, Accept, and a Referer
+pointing at https://websim.com/{project_slug}.
+
+======================================================================
+9. COMPLETE JAVASCRIPT EXAMPLE: SAFE ONE-FILE EDIT
+======================================================================
+
+This example creates a draft from the current live version, replaces the
+homepage, finalizes it, and makes it live. Add error handling, retries, and a
+confirmation step before using this in production.
+
+  const API = 'https://websim.com/api/v1';
+  const token = process.env.WEBSIM_BEARER;
+  const projectId = process.env.WEBSIM_PROJECT_ID;
+
+  const headers = {
+    authorization: `Bearer ${token}`,
+    accept: '*/*',
+    origin: 'https://websim.com'
+  };
+  const jsonHeaders = { ...headers, 'content-type': 'application/json' };
+
+  async function json(res) {
+    const text = await res.text();
+    if (!res.ok) throw new Error(`${res.status}: ${text}`);
+    return text ? JSON.parse(text) : null;
+  }
+
+  const metadata = await json(await fetch(`${API}/projects/${projectId}`, {
+    headers
+  }));
+  const project = metadata.project ?? metadata;
+  const parentVersion = project.current_version;
+
+  const created = await json(await fetch(
+    `${API}/projects/${projectId}/revisions`,
+    {
+      method: 'POST',
+      headers: jsonHeaders,
+      body: JSON.stringify({ parent_version: parentVersion })
+    }
+  ));
+  const revision = created.project_revision;
+
+  const html = `<!doctype html>
+  <html><head><title>API test</title></head>
+  <body><h1>It worked</h1></body></html>`;
+
+  await json(await fetch(`${API}/sites`, {
+    method: 'POST',
+    headers: jsonHeaders,
+    body: JSON.stringify({
+      project_id: projectId,
+      project_version: revision.version,
+      project_revision_id: revision.id,
+      content: html,
+      prompt_data_override: {
+        type: 'plaintext',
+        text: 'API documentation example edit',
+        data: null
+      }
+    })
+  }));
+
+  await json(await fetch(
+    `${API}/projects/${projectId}/revisions/${revision.version}`,
+    {
+      method: 'PATCH',
+      headers: jsonHeaders,
+      body: JSON.stringify({ draft: false })
+    }
+  ));
+
+  await json(await fetch(`${API}/projects/${projectId}`, {
+    method: 'PATCH',
+    headers: jsonHeaders,
+    body: JSON.stringify({
+      current_version: revision.version,
+      auto_set_current: false
+    })
+  }));
+
+  const verifyData = await json(await fetch(
+    `${API}/projects/${projectId}`,
+    { headers }
+  ));
+  const verify = verifyData.project ?? verifyData;
+  if (verify.current_version !== revision.version) {
+    throw new Error('Live revision verification failed');
+  }
+
+  console.log(`Published revision ${revision.version}`);
+
+======================================================================
+10. RELIABILITY, RATE LIMITS, AND SAFETY
+======================================================================
+
+The agent retries HTTP 408, 409, 425, 429, and 5xx responses, plus common
+network/timeout failures. Its default WebSim API behavior is four attempts,
+a 30-second timeout, and exponential backoff beginning at 750 ms and capped at
+15 seconds. Those defaults are implementation choices, not WebSim guarantees.
+
+Recommended practices:
+
+  - Serialize edits per project. Two drafts created from the same parent can
+    overwrite each other's intent when current_version is changed.
+  - Treat 401/403 as an auth or permissions issue; do not blindly retry.
+  - Back off on 429 and honor Retry-After if WebSim sends it.
+  - Verify revision state after finalizing and current_version after promoting.
+  - Keep the previous live version so rollback is one PATCH away.
+  - Never expose bearer tokens in a WebSim page or other client-side code.
+  - Sanitize paths. Reject absolute paths and any path containing "..".
+  - URL-encode path segments individually for raw content downloads.
+  - Avoid duplicate homepage assets such as "index (1).html". WebSim's actual
+    entrypoint is index.html, managed through POST /sites in this agent.
+  - Use a disposable project when probing fields or response changes.
+  - Log status codes and short error bodies, but redact Authorization headers.
+
+The local agent also applies media limits and moderation before uploads. Those
+are local safety controls, not requirements imposed by the WebSim API.
+
+======================================================================
+11. ENDPOINT QUICK REFERENCE
+======================================================================
+
+  GET    /session
+  POST   /projects?include[]=permissions
+  GET    /projects/{project_id}
+  PATCH  /projects/{project_id}
+  PATCH  /projects/{project_id}?include[]=permissions
+  GET    /projects/{project_id}/revisions
+  POST   /projects/{project_id}/revisions
+  PATCH  /projects/{project_id}/revisions/{version}
+  GET    /projects/{project_id}/revisions/{version}/edit-history
+  GET    /projects/{project_id}/revisions/{version}/assets
+  POST   /projects/{project_id}/revisions/{version}/assets
+  POST   /projects/{project_id}/revisions/{version}/edit-assets
+  POST   /sites
+  GET    /projects/{project_id}/comments?first=...&sort_by=...&only_video=...
+  GET    /projects/{project_id}/comments/{comment_id}/replies?last=...
+  POST   /projects/{project_id}/comments
+  DELETE /projects/{project_id}/comments/{comment_id}
+  GET    https://{project_id}.c.websim.com/{path}?v={version}&raw=
+
+======================================================================
+12. SOURCE OF TRUTH IN THIS WORKSPACE
+======================================================================
+
+Primary implementation files:
+
+  websim-ai-agent/mcp-server.js
+  websim-ai-agent/websim-comment.js
+  websim-ai-agent/agent.js
+  websim-ai-agent/moderation.js
+
+The source code is the final authority if this document and the implementation
+ever disagree. Search for API_BASE and fetch( to discover future additions.
+

@@ -1,0 +1,27 @@
+## Websim Platform API quick reference
+
+### This information can be used to call apis within a published websim project.
+
+```js
+// AI — chat completion (returns { role: "assistant", content: string })
+const msg = await websim.chat.completions.create({
+  messages: [{ role: "user", content: "..." }], // role: "user" | "assistant" | "system"
+  json: true, // optional: ask for a JSON-only answer (then JSON.parse(msg.content))
+});
+
+// AI — image generation (returns { url })
+const img = await websim.imageGen({ prompt: "...", aspect_ratio: "1:1" /* optional: width, height, seed, transparent */ });
+
+// AI — text to speech (returns { url } of audio)
+const speech = await websim.textToSpeech({ text: "...", voice: "en-male" /* e.g. en-male, en-female, it-male */ });
+
+// Identity & context
+const user = await websim.getCurrentUser();      // { id, username, avatar_url }
+const project = await websim.getCurrentProject(); // { id, title, description }
+
+// Comments (the project's social feed; also usable as simple storage)
+await websim.postComment({ content: "markdown **content**" }); // rate limit: 5/min
+websim.addEventListener("comment:created", (data) => { /* live updates */ });
+const res = await fetch(`/api/v1/projects/${project.id}/comments?first=50&sort_by=best`);
+const { comments } = await res.json(); // { data: [{ comment, ... }], meta }
+```

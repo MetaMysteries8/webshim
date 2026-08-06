@@ -1,0 +1,29 @@
+{
+  "$comment": [
+    "Copy this file to projects.config.json and fill it in.",
+    "projects.config.json is gitignored because the optional per-project",
+    "'bearer' field holds a credential. Prefer omitting it and letting the",
+    "token resolve from `websim-cli login` (~/.websim-cli.json) instead."
+  ],
+
+  "defaultProject": "demo",
+
+  "projects": {
+    "demo": {
+      "id": "REPLACE_WITH_PROJECT_ID",
+      "slug": "replace-with-project-slug"
+    },
+
+    "example-with-explicit-token": {
+      "id": "REPLACE_WITH_PROJECT_ID",
+      "slug": "replace-with-project-slug",
+      "bearer": "OPTIONAL. Overrides every other token source for this project."
+    }
+  },
+
+  "agent": {
+    "provider": "hyper",
+    "model": "kimi-k2.7-code",
+    "mode": "normal"
+  }
+}

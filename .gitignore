@@ -1,0 +1,33 @@
+# Credentials — NEVER commit. This repo is public.
+# projects.config.json may contain per-project WebSim bearer tokens.
+projects.config.json
+*.token
+*.pem
+.env
+.env.*
+!.env.example
+.websim-cli.json
+
+# Local project mirrors (may contain unpublished work and are not source)
+projects/
+
+# Build output
+/webshim
+/webshim.exe
+/dist/
+*.exe
+*.test
+
+# Go
+vendor/
+*.out
+
+# Editors / OS
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp
+
+# Local state
+*.log

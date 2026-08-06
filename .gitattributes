@@ -1,0 +1,15 @@
+# Normalize to LF in the repository regardless of the checkout platform.
+* text=auto eol=lf
+
+*.go   text eol=lf
+*.md   text eol=lf
+*.yml  text eol=lf
+*.json text eol=lf
+*.txt  text eol=lf
+
+# Never munge binaries.
+*.png binary
+*.jpg binary
+*.gif binary
+*.webp binary
+*.mp4 binary
